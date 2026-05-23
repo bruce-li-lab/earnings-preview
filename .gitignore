@@ -16,3 +16,4 @@ venv/
 .cache/
 newsletters/
 news_config.json
+debug.log

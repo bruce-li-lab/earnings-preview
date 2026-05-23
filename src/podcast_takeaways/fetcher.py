@@ -10,6 +10,8 @@ from pathlib import Path
 import feedparser
 import requests
 
+from earnings_analyzer.url_security import safe_join_url, sanitize_url
+
 
 @dataclass
 class Episode:
@@ -31,7 +33,10 @@ class Episode:
 
 def parse_feed(rss_url: str) -> list[Episode]:
     """Parse an RSS feed and return episodes sorted newest-first."""
-    feed = feedparser.parse(rss_url)
+    safe_url = sanitize_url(rss_url, resolve_host=True)
+    if not safe_url:
+        raise ValueError(f"Unsafe RSS URL: {rss_url}")
+    feed = feedparser.parse(safe_url)
     episodes: list[Episode] = []
 
     for entry in feed.entries:
@@ -100,27 +105,50 @@ def download_audio(
     url: str,
     dest: Path,
     retries: int = 1,
+    max_bytes: int = 1_500_000_000,
 ) -> Path:
     """Download audio file to *dest*, retrying once on failure."""
+    safe_url = sanitize_url(url, resolve_host=True)
+    if not safe_url:
+        raise ValueError(f"Unsafe audio URL: {url}")
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     for attempt in range(1 + retries):
         try:
-            resp = requests.get(
-                url,
-                stream=True,
-                timeout=60,
-                allow_redirects=True,
-                headers={"User-Agent": "PodcastTakeaways/0.1"},
-            )
+            current_url = safe_url
+            for _ in range(6):
+                resp = requests.get(
+                    current_url,
+                    stream=True,
+                    timeout=60,
+                    allow_redirects=False,
+                    headers={"User-Agent": "PodcastTakeaways/0.1"},
+                )
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    next_url = safe_join_url(resp.url, location, resolve_host=True)
+                    resp.close()
+                    if not next_url:
+                        raise ValueError(f"Unsafe redirect target: {location}")
+                    current_url = next_url
+                    continue
+                break
+            else:
+                raise ValueError("Too many redirects")
             resp.raise_for_status()
 
             total = int(resp.headers.get("content-length", 0))
+            if total and total > max_bytes:
+                raise ValueError(f"Audio file too large: {total} bytes")
             downloaded = 0
             with open(dest, "wb") as f:
                 for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
                     f.write(chunk)
                     downloaded += len(chunk)
+                    if downloaded > max_bytes:
+                        raise ValueError(f"Audio file exceeded {max_bytes} bytes")
                     if total:
                         pct = downloaded * 100 // total
                         print(

@@ -18,6 +18,11 @@ class NewsItem:
     url: str
     source: str
     summary: str = ""
+    published_at: str = ""
+    score: float = 0.0
+    topics: list[str] = field(default_factory=list)
+    rank_reason: str = ""
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -34,5 +39,7 @@ class DailyNewsSources:
     sec_filings: list[NewsItem] = field(default_factory=list)
     arxiv_papers: list[NewsItem] = field(default_factory=list)
     hf_papers: list[NewsItem] = field(default_factory=list)
+    official_updates: list[NewsItem] = field(default_factory=list)
     viral_tweets: list[NewsItem] = field(default_factory=list)
+    ranked_items: list[NewsItem] = field(default_factory=list)
     analysis: str = ""

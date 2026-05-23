@@ -15,10 +15,27 @@
     {"title": "Technology", "url": "https://www.ft.com/technology"},
     {"title": "Artificial Intelligence", "url": "https://www.ft.com/artificial-intelligence"}
   ],
+  "official_feeds": [
+    {"title": "OpenAI News", "url": "https://openai.com/news/rss.xml"},
+    {"title": "Google AI", "url": "https://blog.google/technology/ai/rss/"},
+    {"title": "Microsoft AI", "url": "https://blogs.microsoft.com/ai/feed/"}
+  ],
   "spotify_podcasts": [
     {"title": "The All-In Podcast", "url": "https://open.spotify.com/show/2IqXAVFR4e0Bmyjsdc8QzF"},
     {"title": "Acquired", "url": "https://open.spotify.com/show/7Fj0XEuUQLbqnTICXBSKAE"},
     {"title": "Lex Fridman Podcast", "url": "https://open.spotify.com/show/2MAi0BvDc6GTFvKFPXnkCL"},
     {"title": "Odd Lots (Bloomberg)", "url": "https://open.spotify.com/show/35IczmCnU09IEcz5P5jZ89"}
-  ]
+  ],
+  "reddit_sort": "top",
+  "sec_material_only": false,
+  "active_topics": ["ai", "markets", "policy", "research"],
+  "topic_profiles": {
+    "semis": ["nvidia", "gpu", "cuda", "tsmc", "semiconductor"]
+  },
+  "source_weights": {
+    "Techmeme": 7.0,
+    "Official": 6.8,
+    "Financial Times": 6.5,
+    "SEC EDGAR": 6.0
+  }
 }

@@ -20,6 +20,7 @@ from earnings_analyzer.news_sources import (
 from earnings_analyzer.newsletter import render_newsletter, save_newsletter
 from earnings_analyzer.news_config import NewsConfig
 from earnings_analyzer.news_analyzer import _build_headlines_prompt, _fallback_summary
+from earnings_analyzer.ranking import rank_daily_news
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,12 @@ def test_sanitize_url_rejects_bad_schemes():
 def test_sanitize_url_rejects_empty():
     assert _sanitize_url("") is None
     assert _sanitize_url("not-a-url") is None
+
+
+def test_sanitize_url_rejects_local_targets():
+    assert _sanitize_url("http://localhost:8000") is None
+    assert _sanitize_url("http://127.0.0.1/admin") is None
+    assert _sanitize_url("http://10.0.0.5/metadata") is None
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +125,9 @@ def _make_sample_news() -> DailyNewsSources:
         ft_links=[
             NewsItem(title="AI regulation in EU", url="https://www.ft.com/content/abc", source="FT Technology"),
         ],
+        official_updates=[
+            NewsItem(title="OpenAI publishes safety update", url="https://openai.com/news/example", source="Official OpenAI News"),
+        ],
         spotify_links=[
             NewsItem(title="All-In: AI Wars", url="https://open.spotify.com/episode/abc", source="Spotify", summary="Discussion on AI competition."),
         ],
@@ -135,6 +145,7 @@ def test_render_newsletter_contains_all_sections():
     assert "SEC Filings" in html
     assert "X / Twitter" in html
     assert "Financial Times" in html
+    assert "Official Updates" in html
     assert "Spotify Podcasts" in html
     assert "AI Intelligence Brief" in html
 
@@ -281,12 +292,51 @@ def test_fallback_summary():
 
 def test_build_headlines_prompt():
     news = _make_sample_news()
+    news.ranked_items = rank_daily_news(news)[:3]
     prompt = _build_headlines_prompt(news)
     assert "2026-04-04" in prompt
+    assert "Ranked Top Stories" in prompt
     assert "Techmeme" in prompt
+    assert "Official Updates" in prompt
+    assert "Spotify Podcasts" in prompt
     assert "Hacker News" in prompt
     assert "AI Startup Raises $1B" in prompt
     assert "intelligence brief" in prompt
+
+
+def test_rank_daily_news_boosts_cross_source_and_engagement():
+    news = DailyNewsSources(
+        date=date(2026, 4, 4),
+        techmeme_headlines=[
+            NewsItem(
+                title="OpenAI launches new agent platform",
+                url="https://example.com/openai-agent",
+                source="Techmeme",
+            )
+        ],
+        hacker_news=[
+            NewsItem(
+                title="OpenAI launches new agent platform",
+                url="https://news.ycombinator.com/item?id=1",
+                source="Hacker News",
+                metadata={"score": 500, "comments": 120},
+            )
+        ],
+        reddit_finance=[
+            NewsItem(
+                title="Routine bank branch update",
+                url="https://example.com/bank",
+                source="r/finance",
+                metadata={"score": 10, "comments": 2},
+            )
+        ],
+    )
+
+    ranked = rank_daily_news(news, active_topics=["ai"])
+    assert ranked[0].title == "OpenAI launches new agent platform"
+    assert ranked[0].score > ranked[-1].score
+    assert "ai" in ranked[0].topics
+    assert ranked[0].metadata["cross_source_count"] == 2
 
 
 def test_fallback_summary_empty_sources():

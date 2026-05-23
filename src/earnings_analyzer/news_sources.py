@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone
-from urllib.parse import urlparse
+from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -19,6 +19,8 @@ from bs4 import BeautifulSoup
 
 from earnings_analyzer.cache import cache_get, cache_put
 from earnings_analyzer.news_sources_types import DailyNewsSources, NewsItem
+from earnings_analyzer.ranking import rank_daily_news
+from earnings_analyzer.url_security import safe_join_url, sanitize_url
 
 __all__ = [
     "DailyNewsSources",
@@ -31,6 +33,7 @@ __all__ = [
     "fetch_arxiv_papers",
     "fetch_hf_papers",
     "fetch_ft_articles",
+    "fetch_official_updates",
     "fetch_spotify_episodes",
     "fetch_viral_tweets",
     "gather_daily_news",
@@ -45,8 +48,6 @@ _USER_AGENT = (
     "Mozilla/5.0 (compatible; EarningsAnalyzer/0.1; +https://github.com)"
 )
 
-_ALLOWED_SCHEMES = {"http", "https"}
-
 _MAX_RESPONSE_BYTES = 5_000_000  # 5 MB ceiling for any single fetch
 
 
@@ -60,27 +61,60 @@ def _is_past(target_date: date) -> bool:
 
 def _sanitize_url(url: str) -> str | None:
     """Validate and return a URL, or None if suspicious."""
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return None
-    if parsed.scheme not in _ALLOWED_SCHEMES:
-        return None
-    if not parsed.netloc:
-        return None
-    return url
+    return sanitize_url(url)
 
 
 def _safe_get(url: str, **kwargs: object) -> httpx.Response:
-    """Wrapper around httpx.get with size guard and sane defaults."""
-    kwargs.setdefault("headers", {"User-Agent": _USER_AGENT})
-    kwargs.setdefault("timeout", 15)
-    kwargs.setdefault("follow_redirects", True)
-    resp = httpx.get(url, **kwargs)
-    resp.raise_for_status()
-    if len(resp.content) > _MAX_RESPONSE_BYTES:
-        raise ValueError("Response too large")
-    return resp
+    """Wrapper around httpx.get with redirect, URL, and size guards."""
+    current_url = sanitize_url(url, resolve_host=True)
+    if not current_url:
+        raise ValueError(f"Unsafe URL: {url}")
+
+    headers = {"User-Agent": _USER_AGENT}
+    headers.update(kwargs.pop("headers", {}) or {})
+    timeout = kwargs.pop("timeout", 15)
+    params = kwargs.pop("params", None)
+    kwargs.pop("follow_redirects", None)
+
+    for _ in range(6):
+        resp = httpx.get(
+            current_url,
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=False,
+            params=params,
+            **kwargs,
+        )
+        params = None
+        if resp.is_redirect:
+            location = resp.headers.get("location", "")
+            next_url = safe_join_url(str(resp.url), location, resolve_host=True)
+            if not next_url:
+                raise ValueError(f"Unsafe redirect target: {location}")
+            current_url = next_url
+            continue
+
+        resp.raise_for_status()
+        if not sanitize_url(str(resp.url), resolve_host=True):
+            raise ValueError(f"Unsafe final URL: {resp.url}")
+        if len(resp.content) > _MAX_RESPONSE_BYTES:
+            raise ValueError("Response too large")
+        return resp
+
+    raise ValueError("Too many redirects")
+
+
+def _parse_feed_datetime(raw: str | None) -> str:
+    """Parse common RSS/Atom date strings to ISO-8601 UTC when possible."""
+    if not raw:
+        return ""
+    try:
+        dt = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return raw[:40]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +149,13 @@ def _parse_techmeme_html(html: str, max_items: int) -> list[NewsItem]:
         summary = cite.get_text(strip=True)[:200] if cite else ""
 
         items.append(
-            NewsItem(title=title, url=url, source="Techmeme", summary=summary)
+            NewsItem(
+                title=title,
+                url=url,
+                source="Techmeme",
+                summary=summary,
+                metadata={"source_rank": len(items) + 1},
+            )
         )
         if len(items) >= max_items:
             break
@@ -181,6 +221,11 @@ def _fetch_hn_live(max_items: int, min_score: int) -> list[NewsItem]:
                 url=url,
                 source="Hacker News",
                 summary=f"Score: {score} | Comments: {item.get('descendants', 0)}",
+                metadata={
+                    "score": score,
+                    "comments": item.get("descendants", 0),
+                    "source_rank": len(items) + 1,
+                },
             )
         )
         if len(items) >= max_items:
@@ -226,6 +271,12 @@ def _fetch_hn_historical(target: date, max_items: int) -> list[NewsItem]:
                 url=story_url,
                 source="Hacker News",
                 summary=f"Score: {score} | Comments: {comments}",
+                published_at=hit.get("created_at", ""),
+                metadata={
+                    "score": score,
+                    "comments": comments,
+                    "source_rank": len(items) + 1,
+                },
             )
         )
         if len(items) >= max_items:
@@ -265,11 +316,13 @@ _REDDIT_SUBREDDITS = ["investing", "stocks", "finance"]
 def fetch_reddit_finance(
     max_items: int = 5,
     subreddits: list[str] | None = None,
+    sort: str = "top",
     target_date: date | None = None,
 ) -> list[NewsItem]:
-    """Top posts from finance subreddits. Past dates return cached or empty."""
+    """Top finance posts. Past dates return cached or empty."""
     max_items = min(max(1, max_items), 100)
     target = _resolve_date(target_date)
+    sort = sort if sort in {"top", "hot", "rising"} else "top"
 
     cached = cache_get("reddit", target)
     if cached is not None:
@@ -286,9 +339,13 @@ def fetch_reddit_finance(
             continue
         try:
             resp = _safe_get(
-                f"https://www.reddit.com/r/{sub}/hot.json",
+                f"https://www.reddit.com/r/{sub}/{sort}.json",
                 headers={
                     "User-Agent": "EarningsAnalyzer/0.1 (news summary tool)",
+                },
+                params={
+                    "limit": str(min(max_items * 3, 100)),
+                    **({"t": "day"} if sort == "top" else {}),
                 },
             )
             data = resp.json()
@@ -315,6 +372,17 @@ def fetch_reddit_finance(
                         f"Score: {post.get('score', 0)} | "
                         f"Comments: {post.get('num_comments', 0)}"
                     ),
+                    published_at=datetime.fromtimestamp(
+                        post.get("created_utc", 0), tz=timezone.utc
+                    ).isoformat()
+                    if post.get("created_utc")
+                    else "",
+                    metadata={
+                        "score": post.get("score", 0),
+                        "comments": post.get("num_comments", 0),
+                        "upvote_ratio": post.get("upvote_ratio", 0),
+                        "source_rank": len(items) + 1,
+                    },
                 )
             )
             if len(items) >= max_items:
@@ -329,6 +397,39 @@ def fetch_reddit_finance(
 
 _SEC_FULL_TEXT = "https://efts.sec.gov/LATEST/search-index"
 _SEC_BROWSE_RSS = "https://www.sec.gov/cgi-bin/browse-edgar"
+_SEC_MATERIAL_FORMS = {"8-K", "10-Q", "10-K", "6-K", "S-1", "424B4"}
+_SEC_MATERIAL_TERMS = (
+    "2.02",
+    "7.01",
+    "8.01",
+    "earnings",
+    "results of operations",
+    "guidance",
+    "material",
+    "acquisition",
+    "merger",
+)
+
+
+def _is_material_sec_item(form: str, text: str) -> bool:
+    """Return True when a filing is likely market-moving."""
+    form_upper = form.upper()
+    if form_upper in {"10-Q", "10-K", "S-1", "424B4"}:
+        return True
+    haystack = text.lower()
+    return form_upper in _SEC_MATERIAL_FORMS and any(
+        term in haystack for term in _SEC_MATERIAL_TERMS
+    )
+
+
+def _sec_news_item_is_material(item: NewsItem) -> bool:
+    form = str(item.metadata.get("form", ""))
+    if not form:
+        title_match = re.match(r"^\s*([A-Za-z0-9\-/]+):", item.title)
+        form = title_match.group(1) if title_match else ""
+    return bool(item.metadata.get("material")) or _is_material_sec_item(
+        form, f"{item.title} {item.summary}"
+    )
 
 
 def _fetch_sec_historical(
@@ -381,6 +482,13 @@ def _fetch_sec_historical(
                 url=url,
                 source="SEC EDGAR",
                 summary=src.get("file_date", iso),
+                published_at=src.get("file_date", iso),
+                metadata={
+                    "form": form,
+                    "company": company,
+                    "material": _is_material_sec_item(form, " ".join(display_names)),
+                    "source_rank": len(items) + 1,
+                },
             )
         )
     return items
@@ -428,6 +536,19 @@ def _fetch_sec_live(form_types: list[str], max_items: int) -> list[NewsItem]:
                     url=url,
                     source="SEC EDGAR",
                     summary=(summary_el.text or "")[:200] if summary_el is not None else "",
+                    metadata={
+                        "form": form,
+                        "material": _is_material_sec_item(
+                            form,
+                            " ".join(
+                                (
+                                    title_el.text or "",
+                                    summary_el.text if summary_el is not None else "",
+                                )
+                            ),
+                        ),
+                        "source_rank": len(items) + 1,
+                    },
                 )
             )
             if len(items) >= max_items:
@@ -438,6 +559,7 @@ def _fetch_sec_live(form_types: list[str], max_items: int) -> list[NewsItem]:
 def fetch_sec_filings(
     form_types: list[str] | None = None,
     max_items: int = 5,
+    material_only: bool = False,
     target_date: date | None = None,
 ) -> list[NewsItem]:
     """Latest SEC filings. Past dates use full-text search with date filter."""
@@ -447,12 +569,17 @@ def fetch_sec_filings(
 
     cached = cache_get("sec", target)
     if cached is not None:
+        if material_only:
+            cached = [item for item in cached if _sec_news_item_is_material(item)]
         return cached[:max_items]
 
     if _is_past(target):
         items = _fetch_sec_historical(target, types, max_items)
     else:
         items = _fetch_sec_live(types, max_items)
+
+    if material_only:
+        items = [item for item in items if _sec_news_item_is_material(item)]
 
     cache_put("sec", target, items)
     return items
@@ -543,6 +670,8 @@ def _fetch_x_via_api(
                     url=f"https://x.com/{handle}/status/{tweet_id}",
                     source=f"@{handle}",
                     summary=tweet.get("created_at", ""),
+                    published_at=tweet.get("created_at", ""),
+                    metadata={"handle": handle, "source_rank": len(items) + 1},
                 )
             )
     return items
@@ -626,6 +755,7 @@ def _fetch_x_via_browser(
                             url=url,
                             source=f"@{handle}",
                             summary="",
+                            metadata={"handle": handle, "source_rank": len(items) + 1},
                         )
                     )
                     count += 1
@@ -678,6 +808,7 @@ def _fetch_x_via_syndication(
                     url=f"https://x.com/{handle}/status/{tweet_id}",
                     source=f"@{handle}",
                     summary="",
+                    metadata={"handle": handle, "source_rank": len(items) + 1},
                 )
             )
             count += 1
@@ -767,10 +898,18 @@ def fetch_arxiv_papers(
         link = entry.findtext("a:id", "", ns) or ""
         summary = (entry.findtext("a:summary", "", ns) or "").strip()
         summary = re.sub(r"\s+", " ", summary)[:200]
+        published = entry.findtext("a:published", "", ns) or entry.findtext("a:updated", "", ns) or ""
         if not title or not link:
             continue
         items.append(
-            NewsItem(title=title, url=link, source="ArXiv", summary=summary)
+            NewsItem(
+                title=title,
+                url=link,
+                source="ArXiv",
+                summary=summary,
+                published_at=published,
+                metadata={"source_rank": len(items) + 1},
+            )
         )
 
     cache_put("arxiv", target, items)
@@ -822,6 +961,7 @@ def fetch_hf_papers(
                 url=url,
                 source="HF Papers",
                 summary=f"Upvotes: {upvotes} | {summary}" if summary else "",
+                metadata={"upvotes": upvotes, "source_rank": len(items) + 1},
             )
         )
 
@@ -880,6 +1020,9 @@ def fetch_ft_articles(
             title = (item_el.findtext("title") or "").strip()[:300]
             link = (item_el.findtext("link") or "").strip()
             desc = (item_el.findtext("description") or "").strip()[:200]
+            published = _parse_feed_datetime(
+                item_el.findtext("pubDate") or item_el.findtext("published")
+            )
             if not title or not link or title in seen:
                 continue
             article_url = _sanitize_url(link)
@@ -893,6 +1036,8 @@ def fetch_ft_articles(
                     url=article_url,
                     source=f"FT {feed_info.get('title', '')}",
                     summary=desc,
+                    published_at=published,
+                    metadata={"source_rank": len(items) + 1},
                 )
             )
             count += 1
@@ -903,9 +1048,114 @@ def fetch_ft_articles(
 
     return items[:max_items]
 
+# ---------------------------------------------------------------------------
+# Official updates - first-party RSS/Atom feeds for labs, vendors, and policy
+# ---------------------------------------------------------------------------
+
+_DEFAULT_OFFICIAL_FEEDS: list[dict[str, str]] = [
+    {"title": "OpenAI News", "url": "https://openai.com/news/rss.xml"},
+    {"title": "Google AI", "url": "https://blog.google/technology/ai/rss/"},
+    {"title": "Microsoft AI", "url": "https://blogs.microsoft.com/ai/feed/"},
+]
+
+
+def fetch_official_updates(
+    feeds: list[dict[str, str]] | None = None,
+    max_items: int = 6,
+    target_date: date | None = None,
+) -> list[NewsItem]:
+    """Fetch first-party RSS/Atom updates. Past dates return cached or empty."""
+    max_items = min(max(1, max_items), 50)
+    target = _resolve_date(target_date)
+
+    cached = cache_get("official", target)
+    if cached is not None:
+        return cached[:max_items]
+    if _is_past(target):
+        return []
+
+    feed_list = feeds or _DEFAULT_OFFICIAL_FEEDS
+    items: list[NewsItem] = []
+    seen: set[str] = set()
+
+    for feed in feed_list:
+        feed_url = _sanitize_url(feed.get("url", ""))
+        if not feed_url:
+            continue
+        try:
+            resp = _safe_get(feed_url)
+        except (httpx.HTTPError, ValueError):
+            continue
+
+        try:
+            root = ET.fromstring(resp.content[:_MAX_RESPONSE_BYTES])
+        except ET.ParseError:
+            continue
+
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall(".//item"):
+            title = (entry.findtext("title") or "").strip()[:300]
+            link = (entry.findtext("link") or "").strip()
+            summary = (entry.findtext("description") or "").strip()[:250]
+            published = _parse_feed_datetime(entry.findtext("pubDate"))
+            _append_official_item(items, seen, feed, title, link, summary, published)
+            if len(items) >= max_items:
+                cache_put("official", target, items)
+                return items
+
+        for entry in root.findall(".//a:entry", ns):
+            title = (entry.findtext("a:title", "", ns) or "").strip()[:300]
+            link_el = entry.find("a:link", ns)
+            link = link_el.get("href", "") if link_el is not None else ""
+            summary = (
+                entry.findtext("a:summary", "", ns)
+                or entry.findtext("a:content", "", ns)
+                or ""
+            ).strip()[:250]
+            published = (
+                entry.findtext("a:published", "", ns)
+                or entry.findtext("a:updated", "", ns)
+                or ""
+            )
+            _append_official_item(items, seen, feed, title, link, summary, published)
+            if len(items) >= max_items:
+                cache_put("official", target, items)
+                return items
+
+    cache_put("official", target, items)
+    return items
+
+
+def _append_official_item(
+    items: list[NewsItem],
+    seen: set[str],
+    feed: dict[str, str],
+    title: str,
+    link: str,
+    summary: str,
+    published: str,
+) -> None:
+    url = _sanitize_url(link)
+    if not title or not url:
+        return
+    key = url.lower()
+    if key in seen:
+        return
+    seen.add(key)
+    items.append(
+        NewsItem(
+            title=title,
+            url=url,
+            source=f"Official {feed.get('title', '').strip()}".strip(),
+            summary=BeautifulSoup(summary, "lxml").get_text(" ", strip=True)[:200],
+            published_at=published,
+            metadata={"source_rank": len(items) + 1},
+        )
+    )
+
 
 # ---------------------------------------------------------------------------
-# Spotify — episode publish dates available, filter to that day on past runs
+# Spotify - episode publish dates available, filter to that day on past runs
 # ---------------------------------------------------------------------------
 
 _DEFAULT_SPOTIFY_SHOWS: list[dict[str, str]] = [
@@ -994,6 +1244,7 @@ def fetch_spotify_episodes(
                         url=show_url,
                         source="Spotify",
                         summary=oembed.get("title", "")[:200],
+                        metadata={"show": show_title, "source_rank": len(items) + 1},
                     )
                 )
             except (httpx.HTTPError, ValueError, KeyError):
@@ -1028,6 +1279,8 @@ def fetch_spotify_episodes(
                     url=ep_url,
                     source="Spotify",
                     summary=ep_desc[:200] if ep_desc else "",
+                    published_at=_pub,
+                    metadata={"show": show_title, "source_rank": len(items) + 1},
                 )
             )
 
@@ -1137,6 +1390,7 @@ def fetch_viral_tweets(
                 url=tweet_url,
                 source="X (via cross-post)",
                 summary=" | ".join(summary_parts)[:500],
+                metadata={"cross_post_context": context, "source_rank": len(items) + 1},
             )
         )
         if len(items) >= max_items:
@@ -1161,9 +1415,15 @@ def gather_daily_news(
     x_accounts: list[str] | None = None,
     x_bearer_token: str | None = None,
     ft_sections: list[dict[str, str]] | None = None,
+    official_feeds: list[dict[str, str]] | None = None,
     spotify_podcasts: list[dict[str, str]] | None = None,
     reddit_subreddits: list[str] | None = None,
+    reddit_sort: str = "top",
     sec_form_types: list[str] | None = None,
+    sec_material_only: bool = False,
+    active_topics: list[str] | None = None,
+    topic_profiles: dict[str, list[str]] | None = None,
+    source_weights: dict[str, float] | None = None,
     target_date: date | None = None,
 ) -> DailyNewsSources:
     """Collect news from all configured sources for the given date.
@@ -1176,17 +1436,23 @@ def gather_daily_news(
     techmeme = fetch_techmeme_headlines(max_items=techmeme_count, target_date=target)
     hn = fetch_hacker_news(max_items=hn_count, target_date=target)
     reddit = fetch_reddit_finance(
-        max_items=reddit_count, subreddits=reddit_subreddits, target_date=target
+        max_items=reddit_count,
+        subreddits=reddit_subreddits,
+        sort=reddit_sort,
+        target_date=target,
     )
     sec = fetch_sec_filings(
-        form_types=sec_form_types, max_items=sec_count, target_date=target
+        form_types=sec_form_types,
+        max_items=sec_count,
+        material_only=sec_material_only,
+        target_date=target,
     )
 
     viral = fetch_viral_tweets(
         sources=[techmeme, hn, reddit, sec], target_date=target
     )
 
-    return DailyNewsSources(
+    news = DailyNewsSources(
         date=target,
         techmeme_headlines=techmeme,
         hacker_news=hn,
@@ -1197,9 +1463,19 @@ def gather_daily_news(
             accounts=x_accounts, bearer_token=x_bearer_token, target_date=target
         ),
         ft_links=fetch_ft_articles(sections=ft_sections, target_date=target),
+        official_updates=fetch_official_updates(
+            feeds=official_feeds, target_date=target
+        ),
         spotify_links=fetch_spotify_episodes(
             shows=spotify_podcasts, target_date=target
         ),
         arxiv_papers=fetch_arxiv_papers(max_items=arxiv_count, target_date=target),
         hf_papers=fetch_hf_papers(max_items=hf_count, target_date=target),
     )
+    news.ranked_items = rank_daily_news(
+        news,
+        active_topics=active_topics,
+        topic_profiles=topic_profiles,
+        source_weights=source_weights,
+    )
+    return news

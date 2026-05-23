@@ -24,7 +24,7 @@ def _render_news_section(title: str, icon: str, items: list[NewsItem]) -> str:
         )
         rows.append(
             f"""        <div class="news-item">
-          <a href="{_esc(item.url)}" target="_blank" rel="noopener">{_esc(item.title)}</a>
+          <a href="{_esc(item.url)}" target="_blank" rel="noopener noreferrer">{_esc(item.title)}</a>
           <span class="source-badge">{_esc(item.source)}</span>
           {summary_html}
         </div>"""
@@ -56,7 +56,7 @@ def _render_viral_tweets_section(items: list[NewsItem]) -> str:
         rows.append(
             f"""        <div class="news-item tweet-card">
           <div class="tweet-author">
-            <a href="{_esc(item.url)}" target="_blank" rel="noopener">{_esc(item.title)}</a>
+            <a href="{_esc(item.url)}" target="_blank" rel="noopener noreferrer">{_esc(item.title)}</a>
             <span class="source-badge">{_esc(item.source)}</span>
           </div>
           <p class="tweet-text">{tweet_text}</p>
@@ -68,6 +68,43 @@ def _render_viral_tweets_section(items: list[NewsItem]) -> str:
     <div class="section">
       <h2>&#x1F525; Viral Tweets</h2>
       <p class="section-subtitle">Tweets that escaped X — shared across Techmeme, HN, and Reddit</p>
+      {"".join(rows)}
+    </div>"""
+
+
+def _render_ranked_section(items: list[NewsItem]) -> str:
+    """Render cross-source ranked top stories."""
+    if not items:
+        return ""
+
+    rows = []
+    for item in items[:10]:
+        topics = ", ".join(item.topics)
+        details = []
+        if item.score:
+            details.append(f"Score {item.score:g}")
+        if topics:
+            details.append(f"Topics: {topics}")
+        if item.rank_reason:
+            details.append(item.rank_reason)
+        detail_html = (
+            f'<p class="rank-reason">{_esc(" | ".join(details))}</p>' if details else ""
+        )
+        summary_html = (
+            f'<p class="summary">{_esc(item.summary)}</p>' if item.summary else ""
+        )
+        rows.append(
+            f"""        <div class="news-item ranked-card">
+          <a href="{_esc(item.url)}" target="_blank" rel="noopener noreferrer">{_esc(item.title)}</a>
+          <span class="source-badge">{_esc(item.source)}</span>
+          {detail_html}
+          {summary_html}
+        </div>"""
+        )
+
+    return f"""
+    <div class="section">
+      <h2>&#x2B50; Ranked Top Stories</h2>
       {"".join(rows)}
     </div>"""
 
@@ -121,6 +158,7 @@ def render_newsletter(news: DailyNewsSources) -> str:
 
     sections = [
         _render_analysis_section(news.analysis),
+        _render_ranked_section(news.ranked_items),
         _render_viral_tweets_section(news.viral_tweets),
         _render_news_section("Techmeme Headlines", "&#x1F4F0;", news.techmeme_headlines),
         _render_news_section("Hacker News", "&#x1F4E1;", news.hacker_news),
@@ -128,6 +166,7 @@ def render_newsletter(news: DailyNewsSources) -> str:
         _render_news_section("SEC Filings", "&#x1F4DC;", news.sec_filings),
         _render_news_section("X / Twitter", "&#x1D54F;", news.x_links),
         _render_news_section("Financial Times", "&#x1F4CA;", news.ft_links),
+        _render_news_section("Official Updates", "&#x2705;", news.official_updates),
         _render_news_section("Spotify Podcasts", "&#x1F3A7;", news.spotify_links),
         _render_news_section("ArXiv Papers", "&#x1F4D1;", news.arxiv_papers),
         _render_news_section("HF Daily Papers", "&#x1F917;", news.hf_papers),
@@ -224,6 +263,15 @@ def render_newsletter(news: DailyNewsSources) -> str:
       font-size: 0.75rem;
       margin-top: 0.4rem;
       font-style: italic;
+    }}
+    .ranked-card {{
+      border-left: 3px solid var(--green);
+    }}
+    .rank-reason {{
+      color: var(--green);
+      font-size: 0.76rem;
+      margin-top: 0.35rem;
+      line-height: 1.4;
     }}
     .news-item {{
       background: var(--card);
@@ -343,6 +391,7 @@ def render_newsletter(news: DailyNewsSources) -> str:
       <a href="https://www.sec.gov/edgar">SEC</a> &middot;
       <a href="https://x.com">X</a> &middot;
       <a href="https://www.ft.com">FT</a> &middot;
+      Official feeds &middot;
       <a href="https://open.spotify.com">Spotify</a>
     </footer>
   </div>
@@ -371,7 +420,9 @@ def save_newsletter(
         raise ValueError(f"Invalid filename: {filename}")
 
     filepath = (output_path / filename).resolve()
-    if not str(filepath).startswith(str(output_path)):
+    try:
+        filepath.relative_to(output_path)
+    except ValueError:
         raise ValueError("Filename escapes output directory")
 
     filepath.write_text(render_newsletter(news), encoding="utf-8")

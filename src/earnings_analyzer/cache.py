@@ -13,6 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from earnings_analyzer.news_sources_types import NewsItem
+from earnings_analyzer.url_security import sanitize_url
 
 
 _CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "news"
@@ -43,12 +44,26 @@ def cache_get(source: str, target_date: date) -> list[NewsItem] | None:
     for entry in data:
         if not isinstance(entry, dict):
             continue
+        url = sanitize_url(str(entry.get("url", "")))
+        if not url:
+            continue
         items.append(
             NewsItem(
                 title=str(entry.get("title", ""))[:300],
-                url=str(entry.get("url", "")),
+                url=url,
                 source=str(entry.get("source", "")),
                 summary=str(entry.get("summary", "")),
+                published_at=str(entry.get("published_at", "")),
+                score=float(entry.get("score", 0) or 0),
+                topics=[
+                    str(topic)
+                    for topic in entry.get("topics", [])
+                    if isinstance(topic, str)
+                ],
+                rank_reason=str(entry.get("rank_reason", "")),
+                metadata=entry.get("metadata", {})
+                if isinstance(entry.get("metadata"), dict)
+                else {},
             )
         )
     return items
@@ -67,7 +82,17 @@ def cache_put(source: str, target_date: date, items: list[NewsItem]) -> None:
     path = _cache_path(source, target_date)
     path.parent.mkdir(parents=True, exist_ok=True)
     serialized = [
-        {"title": it.title, "url": it.url, "source": it.source, "summary": it.summary}
+        {
+            "title": it.title,
+            "url": it.url,
+            "source": it.source,
+            "summary": it.summary,
+            "published_at": it.published_at,
+            "score": it.score,
+            "topics": it.topics,
+            "rank_reason": it.rank_reason,
+            "metadata": it.metadata,
+        }
         for it in items
     ]
     path.write_text(json.dumps(serialized, indent=2, ensure_ascii=False), encoding="utf-8")

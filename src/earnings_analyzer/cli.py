@@ -140,9 +140,15 @@ def daily_news(
             x_accounts=cfg.x_accounts,
             x_bearer_token=cfg.x_bearer_token,
             ft_sections=cfg.ft_sections,
+            official_feeds=cfg.official_feeds,
             spotify_podcasts=cfg.spotify_podcasts,
             reddit_subreddits=cfg.reddit_subreddits,
+            reddit_sort=cfg.reddit_sort,
             sec_form_types=cfg.sec_form_types,
+            sec_material_only=cfg.sec_material_only,
+            active_topics=cfg.active_topics,
+            topic_profiles=cfg.topic_profiles,
+            source_weights=cfg.source_weights,
             target_date=note_date,
         )
 
@@ -153,6 +159,7 @@ def daily_news(
             + len(news.sec_filings)
             + len(news.arxiv_papers)
             + len(news.hf_papers)
+            + len(news.official_updates)
         )
         console.print(f"  [dim]Collected {total} items from live sources[/dim]")
 
@@ -181,6 +188,7 @@ def daily_news(
             f"{len(news.sec_filings)} SEC, "
             f"{len(news.x_links)} X, "
             f"{len(news.ft_links)} FT, "
+            f"{len(news.official_updates)} official, "
             f"{len(news.spotify_links)} podcasts[/dim]"
         )
 

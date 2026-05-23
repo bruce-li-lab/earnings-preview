@@ -28,6 +28,8 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -e ".[ai]"
+          pip install pip-audit
+          pip-audit
           pip install playwright
           playwright install chromium
 
