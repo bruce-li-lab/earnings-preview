@@ -12,6 +12,8 @@ import requests
 
 from earnings_analyzer.url_security import safe_join_url, sanitize_url
 
+_MAX_FEED_BYTES = 5_000_000
+
 
 @dataclass
 class Episode:
@@ -31,12 +33,57 @@ class Episode:
         return s[:80] or "episode"
 
 
+def _fetch_feed_bytes(rss_url: str, max_bytes: int = _MAX_FEED_BYTES) -> bytes:
+    """Fetch an RSS/Atom feed with redirect and size guards."""
+    current_url = sanitize_url(rss_url, resolve_host=True)
+    if not current_url:
+        raise ValueError(f"Unsafe RSS URL: {rss_url}")
+
+    for _ in range(6):
+        resp = requests.get(
+            current_url,
+            stream=True,
+            timeout=30,
+            allow_redirects=False,
+            headers={"User-Agent": "PodcastTakeaways/0.1"},
+        )
+        if resp.is_redirect:
+            location = resp.headers.get("location", "")
+            next_url = safe_join_url(resp.url, location, resolve_host=True)
+            resp.close()
+            if not next_url:
+                raise ValueError(f"Unsafe redirect target: {location}")
+            current_url = next_url
+            continue
+
+        try:
+            resp.raise_for_status()
+            if not sanitize_url(resp.url, resolve_host=True):
+                raise ValueError(f"Unsafe final RSS URL: {resp.url}")
+
+            total = int(resp.headers.get("content-length", 0))
+            if total and total > max_bytes:
+                raise ValueError(f"RSS feed too large: {total} bytes")
+
+            chunks: list[bytes] = []
+            downloaded = 0
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                downloaded += len(chunk)
+                if downloaded > max_bytes:
+                    raise ValueError(f"RSS feed exceeded {max_bytes} bytes")
+                chunks.append(chunk)
+            return b"".join(chunks)
+        finally:
+            resp.close()
+
+    raise ValueError("Too many redirects")
+
+
 def parse_feed(rss_url: str) -> list[Episode]:
     """Parse an RSS feed and return episodes sorted newest-first."""
-    safe_url = sanitize_url(rss_url, resolve_host=True)
-    if not safe_url:
-        raise ValueError(f"Unsafe RSS URL: {rss_url}")
-    feed = feedparser.parse(safe_url)
+    feed = feedparser.parse(_fetch_feed_bytes(rss_url))
     episodes: list[Episode] = []
 
     for entry in feed.entries:
@@ -136,6 +183,8 @@ def download_audio(
             else:
                 raise ValueError("Too many redirects")
             resp.raise_for_status()
+            if not sanitize_url(resp.url, resolve_host=True):
+                raise ValueError(f"Unsafe final audio URL: {resp.url}")
 
             total = int(resp.headers.get("content-length", 0))
             if total and total > max_bytes:

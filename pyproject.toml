@@ -10,6 +10,7 @@ dependencies = [
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "click>=8.1",
+    "defusedxml>=0.7.1",
 ]
 
 [project.optional-dependencies]

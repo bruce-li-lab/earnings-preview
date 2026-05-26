@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from xml.etree import ElementTree as ET
+from defusedxml import ElementTree as ET
 
 import httpx
 from bs4 import BeautifulSoup

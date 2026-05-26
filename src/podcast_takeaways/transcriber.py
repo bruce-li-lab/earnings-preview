@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 _CACHE_DIR = Path.home() / ".podcast-takeaways" / "transcripts"
