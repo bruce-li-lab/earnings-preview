@@ -1,0 +1,92 @@
+name: Backfill News Summaries
+
+# One-off / on-demand reconstruction of past daily news summaries.
+# Generates a markdown summary for each day in [start_date, end_date],
+# uploads them as a downloadable artifact, and (best effort) commits them
+# into archive/news/ so the history is preserved in the repo.
+#
+# NOTE: historical fetching is partial — Techmeme, Hacker News, arXiv,
+# HF papers and SEC support past dates; Reddit, FT and X do not, so those
+# sections will be empty for reconstructed days.
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First date to reconstruct (YYYY-MM-DD)"
+        required: true
+      end_date:
+        description: "Last date to reconstruct (YYYY-MM-DD, inclusive)"
+        required: true
+      analyze:
+        description: "Run the AI brief (needs GEMINI_API_KEY)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[ai]"
+          pip install playwright
+          playwright install chromium
+
+      - name: Generate summaries for date range
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -u
+          mkdir -p out
+          analyze_flag="--no-analyze"
+          if [ "${{ inputs.analyze }}" = "true" ] && [ -n "${GEMINI_API_KEY:-}" ]; then
+            analyze_flag="--analyze"
+          fi
+          cur="${{ inputs.start_date }}"
+          end="${{ inputs.end_date }}"
+          # validate dates parse
+          date -d "$cur" >/dev/null
+          date -d "$end" >/dev/null
+          while [ "$(date -d "$cur" +%Y%m%d)" -le "$(date -d "$end" +%Y%m%d)" ]; do
+            echo "::group::$cur"
+            earnings-analyzer news --date "$cur" --output-dir ./out "$analyze_flag" || echo "WARN: generation failed for $cur"
+            echo "::endgroup::"
+            cur=$(date -I -d "$cur + 1 day")
+          done
+          echo "Generated markdown files:"
+          ls -la out/*.md || true
+
+      - name: Upload markdown artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: news-backfill
+          path: out/*.md
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Commit summaries to archive/news (best effort)
+        continue-on-error: true
+        run: |
+          set -e
+          mkdir -p archive/news
+          cp out/news-summary-*.md archive/news/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add archive/news
+          if git diff --staged --quiet; then
+            echo "Nothing to commit."
+          else
+            git pull --rebase --autostash || true
+            git commit -m "Backfill news summaries ${{ inputs.start_date }}..${{ inputs.end_date }}"
+            git push
+          fi

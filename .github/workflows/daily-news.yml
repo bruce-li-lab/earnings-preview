@@ -17,7 +17,7 @@ jobs:
   generate:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -55,6 +55,22 @@ jobs:
           LATEST_MD=$(ls -t news-summary-*.md 2>/dev/null | head -1)
           if [ -n "$LATEST_MD" ]; then
             cp "$LATEST_MD" latest.md
+          fi
+
+      - name: Persist markdown to repo archive
+        run: |
+          set -e
+          mkdir -p archive/news
+          cp ./site/news-summary-*.md archive/news/ 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add archive/news
+          if git diff --staged --quiet; then
+            echo "No new markdown to commit."
+          else
+            git pull --rebase --autostash || true
+            git commit -m "Archive daily news summary ($(date -u +%Y-%m-%d))"
+            git push
           fi
 
       - name: Upload Pages artifact
