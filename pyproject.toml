@@ -5,7 +5,7 @@ description = "Analyze quarterly earnings: financials, SEC filings, analyst Q&A,
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28.1",
-    "rich>=13.0",
+    "rich>=15.0.0",
     "yfinance>=1.4.0",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
