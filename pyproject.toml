@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Analyze quarterly earnings: financials, SEC filings, analyst Q&A, guidance, and price reaction"
 requires-python = ">=3.11"
 dependencies = [
-    "httpx>=0.27",
+    "httpx>=0.28.1",
     "rich>=13.0",
     "yfinance>=1.4.0",
     "beautifulsoup4>=4.12",
