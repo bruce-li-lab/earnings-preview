@@ -17,7 +17,7 @@ dependencies = [
 ai = ["google-genai>=1.0"]
 browser = ["playwright>=1.40"]
 podcast = ["openai-whisper>=20240930", "feedparser>=6.0", "requests>=2.31", "google-genai>=1.0"]
-security = ["pip-audit>=2.7"]
+security = ["pip-audit>=2.10.0"]
 
 [project.scripts]
 earnings-analyzer = "earnings_analyzer.cli:main"
