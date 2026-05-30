@@ -67,7 +67,7 @@ jobs:
           ls -la out/*.md || true
 
       - name: Upload markdown artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: news-backfill
           path: out/*.md
