@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28.1",
     "rich>=13.0",
-    "yfinance>=1.4.0",
+    "yfinance>=1.4.1",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
     "click>=8.1",
